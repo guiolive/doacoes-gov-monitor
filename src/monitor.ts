@@ -20,19 +20,26 @@ const UFS_FILTRAR: string[] = [];
 
 // =============================================================================
 
+interface Municipio {
+  nome: string;
+  uf?: { sigla: string };
+}
+
 interface Anuncio {
   id: number;
   titulo?: string;
-  valorAvaliacao?: number;
-  municipio?: { nome: string };
-  uf?: { sigla: string };
-  descricao?: string;
-  situacao?: string;
+  quantidade?: number;
+  municipio?: Municipio;
+  dataExpiracao?: string;
+  usuarioTipo?: { nome: string };
+  possuiOnusOuEncargos?: boolean;
 }
 
 interface ApiResponse {
-  content: Anuncio[];
-  totalElements: number;
+  anuncios: Anuncio[];
+  totalElements?: number;
+  materialCategorias?: Array<{ id: number; nome: string }>;
+  ufs?: Array<{ id: number; sigla: string; nome: string }>;
 }
 
 function loadIds(): Set<string> {
@@ -50,42 +57,65 @@ function saveIds(ids: Set<string>): void {
 }
 
 async function fetchAnnouncements(categoryId: number): Promise<Anuncio[]> {
-  const body: Record<string, unknown> = {
-    pagina: 0,
-    tamanhoPagina: 20,
-    categorias: [categoryId],
-    situacao: 'DISPONIVEL',
+  const params: Record<string, string> = {
+    pesquisa: '',
+    materialCategorias: String(categoryId),
+    ufs: UFS_FILTRAR.join(','),
+    inicio: '0',
+    ordem: '1',
+    anuncianteTipos: '',
+    materialTipos: '',
+    materialSituacoes: '',
+    possuiOnusOuEncargos: '',
+    numerosAnuncios: '',
+    tpConsulta: '',
+    anuncioSituacoes: '',
   };
 
-  if (UFS_FILTRAR.length > 0) {
-    body.ufs = UFS_FILTRAR;
-  }
-
-  const { data } = await axios.post<ApiResponse>(
+  const { data } = await axios.get<ApiResponse>(
     'https://doacoes.gov.br/reuse/api/publico/anuncios/listar',
-    body,
-    { timeout: 30_000 }
+    {
+      params,
+      timeout: 30_000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/json',
+      },
+    }
   );
 
-  return data?.content ?? [];
+  return data?.anuncios ?? [];
 }
 
 function formatMessage(anuncio: Anuncio, categoria: string): string {
-  const valor = anuncio.valorAvaliacao != null
-    ? `R$ ${anuncio.valorAvaliacao.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`
-    : 'Valor não informado';
+  const cidade = anuncio.municipio?.nome ?? '';
+  const uf = anuncio.municipio?.uf?.sigla ?? '';
+  const local = [cidade, uf].filter(Boolean).join('/');
+  const tipo = anuncio.usuarioTipo?.nome ?? 'N/A';
+  const possuiOnus = anuncio.possuiOnusOuEncargos ? 'Sim' : 'Não';
+  const quantidade = anuncio.quantidade ?? 'N/A';
 
-  const local = [anuncio.municipio?.nome, anuncio.uf?.sigla]
-    .filter(Boolean)
-    .join(' - ');
+  let dataExp = anuncio.dataExpiracao ?? '';
+  if (dataExp) {
+    // Formato da API: "2026-01-29-00-00-00" → "2026-01-29"
+    dataExp = dataExp.substring(0, 10);
+  }
+
+  const link = `https://doacoes.gov.br/anuncios/${anuncio.id}`;
 
   return [
-    `🚗 <b>Novo anúncio: ${categoria}</b>`,
+    `🆕 <b>NOVO ANÚNCIO DE DOAÇÃO!</b>`,
     '',
-    `📋 <b>${anuncio.titulo ?? 'Sem título'}</b>`,
-    local ? `📍 ${local}` : '',
-    `💰 ${valor}`,
-    `🔗 <a href="https://doacoes.gov.br/anuncio/${anuncio.id}">Ver anúncio</a>`,
+    `📦 <b>${anuncio.titulo ?? 'Sem título'}</b>`,
+    '',
+    local ? `📍 <b>Local:</b> ${local}` : '',
+    `📊 <b>Quantidade:</b> ${quantidade}`,
+    `🏷️ <b>Categoria:</b> ${categoria}`,
+    `🔄 <b>Tipo:</b> ${tipo}`,
+    `💰 <b>Possui ônus:</b> ${possuiOnus}`,
+    dataExp ? `📅 <b>Expira em:</b> ${dataExp}` : '',
+    '',
+    `🔗 <a href="${link}">Ver anúncio completo</a>`,
   ]
     .filter(line => line !== undefined)
     .join('\n');
@@ -128,16 +158,30 @@ export async function checkDoacoes(): Promise<void> {
 }
 
 export async function listCategories(): Promise<void> {
-  // Busca categorias disponíveis na API
+  // Busca categorias disponíveis via a própria API de listagem
   try {
-    const { data } = await axios.get(
-      'https://doacoes.gov.br/reuse/api/publico/categorias',
-      { timeout: 30_000 }
+    const { data } = await axios.get<ApiResponse>(
+      'https://doacoes.gov.br/reuse/api/publico/anuncios/listar',
+      {
+        params: { pesquisa: '', inicio: '0', ordem: '1' },
+        timeout: 30_000,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Accept': 'application/json',
+        },
+      }
     );
-    console.log('\nCategorias disponíveis:');
-    const cats = Array.isArray(data) ? data : data.content ?? [];
-    for (const cat of cats) {
-      console.log(`  ${cat.id}: ${cat.nome}`);
+
+    // A resposta inclui materialCategorias com as categorias disponíveis
+    const cats = data.materialCategorias;
+    if (cats && cats.length > 0) {
+      console.log('\nCategorias disponíveis na API:');
+      for (const cat of cats) {
+        const monitored = CATEGORIES[cat.id] ? ' ← monitorada' : '';
+        console.log(`  ${cat.id}: ${cat.nome}${monitored}`);
+      }
+    } else {
+      throw new Error('Sem categorias na resposta');
     }
   } catch {
     console.log('\nCategorias monitoradas atualmente:');
