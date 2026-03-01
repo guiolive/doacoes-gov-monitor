@@ -1,0 +1,79 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies & Build
+        run: npm ci && npm run build
+
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Copy bundle to Proxmox host
+        run: |
+          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new \
+            dist/index.js \
+            root@${{ secrets.DEPLOY_HOST }}:/tmp/doacoes-index.js
+
+      - name: Deploy to container 101
+        run: |
+          ssh -i ~/.ssh/deploy_key root@${{ secrets.DEPLOY_HOST }} << 'EOF'
+          set -e
+
+          echo "=== Backup versão atual ==="
+          pct exec 101 -- cp /opt/doacoes-gov-monitor/index.js \
+            /opt/doacoes-gov-monitor/index.js.bak 2>/dev/null || echo "Sem backup anterior"
+
+          echo "=== Deploy nova versão ==="
+          pct push 101 /tmp/doacoes-index.js /opt/doacoes-gov-monitor/index.js
+
+          echo "=== Reiniciar serviço ==="
+          pct exec 101 -- systemctl restart doacoes-monitor.service
+
+          echo "=== Health check ==="
+          sleep 5
+          STATUS=$(pct exec 101 -- systemctl is-active doacoes-monitor.service)
+
+          if [ "$STATUS" != "active" ]; then
+            echo "FALHA: serviço não subiu! Fazendo rollback..."
+            pct exec 101 -- cp /opt/doacoes-gov-monitor/index.js.bak \
+              /opt/doacoes-gov-monitor/index.js
+            pct exec 101 -- systemctl restart doacoes-monitor.service
+            exit 1
+          fi
+
+          echo "Deploy OK! Serviço: $STATUS"
+          rm -f /tmp/doacoes-index.js
+          EOF
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

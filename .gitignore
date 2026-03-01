@@ -1,0 +1,18 @@
+# Dependências
+node_modules/
+
+# Build
+dist/
+
+# Ambiente (nunca versionar — contém token do Telegram)
+.env
+.env.local
+
+# Estado do monitor (dados de produção, não versionar)
+ids_notificados.json
+*.json.bak
+
+# Editor
+.DS_Store
+.vscode/
+*.swp
